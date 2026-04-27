@@ -1,0 +1,46 @@
+{
+  "name": "meta-ads-mcp",
+  "version": "2.0.0",
+  "description": "Production-ready Meta Ads MCP Server for Agencies — Multi-tenant customer model with OAuth",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "npx tsx src/index.ts",
+    "start": "node dist/index.js",
+    "db:migrate": "node dist/db/migrate.js",
+    "db:seed": "node dist/db/seed.js"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^9.7.0",
+    "@fastify/swagger-ui": "^5.2.5",
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^16.5.0",
+    "fastify": "^5.8.4",
+    "fastify-type-provider-zod": "^4.0.2",
+    "ioredis": "^5.6.1",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.15.6",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.11.14",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "mcp",
+    "meta",
+    "facebook",
+    "ads",
+    "marketing-api",
+    "agency",
+    "multi-tenant"
+  ],
+  "author": "HellenicAI",
+  "license": "MIT"
+}
