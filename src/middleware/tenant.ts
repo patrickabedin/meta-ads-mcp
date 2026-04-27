@@ -5,7 +5,7 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { redis } from '../db/index.js';
 import { findCustomerByApiKey, findAdAccountByMetaId, incrementCustomerUsage, logUsage, findAdminByEmail } from '../db/index.js';
-import { verifyJwt, decryptToken } from './crypto.js';
+import { verifyJwt, decryptToken } from '../auth/crypto.js';
 import type { RequestContext, Customer } from '../types/index.js';
 
 // Extend Fastify request type

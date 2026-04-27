@@ -204,9 +204,9 @@ async function main() {
     schema: { tags: ['MCP Protocol'], summary: 'MCP JSON-RPC request' },
   }, async (request, reply) => {
     const startTime = Date.now();
+    const customer = request.ctx?.customer;
     try {
       const sessionId = request.headers['mcp-session-id'] as string | undefined;
-      const customer = request.ctx?.customer;
 
       if (customer) {
         // Check weekly quota

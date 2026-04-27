@@ -152,16 +152,12 @@ export async function registerCustomerRoutes(fastify: FastifyInstance): Promise<
   });
 
   // ── Connect Meta Ad Account ──
-  fastify.post('/api/v1/accounts/connect', {
+  fastify.post('/api/v1/customer/accounts/connect', {
     schema: {
       tags: ['Accounts'],
       summary: 'Connect a Meta ad account',
       description: 'Store an encrypted Meta access token for an ad account.',
       body: ConnectMetaSchema,
-      response: {
-        201: z.object({ success: z.boolean(), account: z.object({ id: z.string(), meta_ad_account_id: z.string(), account_name: z.string().nullable() }) }),
-        403: z.object({ error: z.string() }),
-      },
     },
   }, async (request, reply) => {
     const ctx = request.ctx as RequestContext;
@@ -198,7 +194,7 @@ export async function registerCustomerRoutes(fastify: FastifyInstance): Promise<
   });
 
   // ── List Connected Accounts ──
-  fastify.get('/api/v1/accounts', {
+  fastify.get('/api/v1/customer/accounts', {
     schema: {
       tags: ['Accounts'],
       summary: 'List connected Meta ad accounts',
@@ -222,7 +218,7 @@ export async function registerCustomerRoutes(fastify: FastifyInstance): Promise<
   });
 
   // ── Disconnect Account ──
-  fastify.delete('/api/v1/accounts/:id', {
+  fastify.delete('/api/v1/customer/accounts/:id', {
     schema: {
       tags: ['Accounts'],
       summary: 'Disconnect a Meta ad account',

@@ -50,8 +50,9 @@ export function decryptToken(encrypted: string): string {
 }
 
 // ── JWT ──
-export function signJwt(payload: Record<string, unknown>, expiresIn = '7d'): string {
-  return jwt.sign(payload, JWT_SECRET || 'insecure-default-secret', { expiresIn });
+export function signJwt(payload: Record<string, unknown>, expiresIn: string | number = '7d'): string {
+  const secret = JWT_SECRET || 'insecure-default-secret';
+  return jwt.sign(payload, secret, { expiresIn: expiresIn as jwt.SignOptions['expiresIn'] });
 }
 
 export function verifyJwt(token: string): Record<string, unknown> | null {

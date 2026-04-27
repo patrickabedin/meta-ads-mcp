@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import pg from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { randomUUID } from 'crypto';
 import type { Customer, CustomerAdAccount, UsageLog, Admin } from '../types/index.js';
 
@@ -28,7 +28,7 @@ export const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379/
   enableReadyCheck: true,
 });
 
-redis.on('error', (err) => {
+redis.on('error', (err: Error) => {
   console.error('Redis error:', err.message);
 });
 
