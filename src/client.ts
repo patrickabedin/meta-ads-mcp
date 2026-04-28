@@ -1,3 +1,5 @@
+/// <reference lib="dom" />
+
 import { RateLimiter } from './utils/rate-limiter.js';
 import { getNextCursor } from './utils/pagination.js';
 import { sleep } from './utils/sleep.js';

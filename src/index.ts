@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
-import { randomUUID } from 'crypto';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import {
@@ -9,7 +8,7 @@ import {
   validatorCompiler,
 } from 'fastify-type-provider-zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { MetaApiClient } from './client.js';
 import { registerAllTools } from './tools/index.js';
 import { registerRestRoutes } from './rest/proxy.js';
@@ -27,42 +26,67 @@ const token = process.env.META_ACCESS_TOKEN ?? '';
 const API_KEY = process.env.MCP_API_KEY;
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
 
-// Track active MCP sessions with TTL
-const SESSION_TTL_MS = 30 * 60 * 1000;
-const sessions = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport; lastSeen: number; customerId?: string }>();
+// ============================================================================
+// GLOBAL MCP SERVER — Single instance, single transport pair (Pipeboard-style)
+// ============================================================================
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [sid, s] of sessions) {
-    if (now - s.lastSeen > SESSION_TTL_MS) {
-      sessions.delete(sid);
-      console.log(`Session expired: ${sid}`);
-    }
-  }
-}, 5 * 60 * 1000).unref();
+let globalClientTransport: InMemoryTransport;
+let isServerReady = false;
 
-function createMcpSession(metaToken?: string, metaAccountId?: string, customer?: Customer): { server: McpServer; transport: StreamableHTTPServerTransport } {
-  const resolvedToken = metaToken || token;
-  if (!resolvedToken) {
-    throw new Error('Missing Meta access token. Provide X-Meta-Token header, connect an account, or set META_ACCESS_TOKEN env var.');
+async function initGlobalMcpServer() {
+  if (!token) {
+    console.warn('[MCP] No META_ACCESS_TOKEN configured — MCP endpoint will reject requests');
+    return;
   }
-  const client = new MetaApiClient(resolvedToken, {
-    accountId: metaAccountId ?? process.env.META_AD_ACCOUNT_ID,
+
+  const client = new MetaApiClient(token, {
+    accountId: process.env.META_AD_ACCOUNT_ID,
     apiVersion: process.env.META_API_VERSION,
   });
+
   const server = new McpServer({ name: 'meta-ads-mcp', version: '2.0.0' });
-  registerAllTools(server, client, customer);
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    enableJsonResponse: false,
-  });
-  return { server, transport };
+  registerAllTools(server, client);
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  globalClientTransport = clientTransport;
+
+  await server.server.connect(serverTransport);
+  isServerReady = true;
+
+  console.log('[MCP] Global server initialized with 77 tools');
 }
+
+// Send a JSON-RPC request through the global transport and wait for response
+async function sendMcpRequest(requestBody: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!isServerReady || !globalClientTransport) {
+    throw new Error('MCP server not initialized');
+  }
+
+  return new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('MCP request timeout'));
+    }, 30000);
+
+    globalClientTransport.onmessage = (msg: any) => {
+      clearTimeout(timeout);
+      resolve(msg as Record<string, unknown>);
+    };
+
+    globalClientTransport.send(requestBody as any);
+  });
+}
+
+// ============================================================================
+// FASTIFY SERVER
+// ============================================================================
 
 async function main() {
   // Initialize database
   await initDatabase();
   startWeeklyResetScheduler();
+
+  // Initialize the global MCP server
+  await initGlobalMcpServer();
 
   const fastify = Fastify({ logger: false });
   fastify.setValidatorCompiler(validatorCompiler);
@@ -126,6 +150,8 @@ async function main() {
     if (path.startsWith('/api/v1/auth/')) return; // Allow public auth endpoints
     if (path.startsWith('/admin/api/v1/auth/')) return; // Allow admin login
 
+    if (path === '/mcp') return; // MCP handles its own auth
+    if (request.method === 'OPTIONS') return; // Allow CORS preflight
     const authHeader = request.headers.authorization;
     const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
     const queryKey = (request.query as Record<string, string>)?.api_key;
@@ -199,72 +225,79 @@ async function main() {
   // OAuth routes
   await registerOAuthRoutes(fastify);
 
-  // MCP endpoint
+  // Global CORS: add headers to all responses
+  fastify.addHook('onSend', async (request, reply, payload) => {
+    reply.header('Access-Control-Allow-Origin', '*');
+    reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    reply.header('Access-Control-Allow-Headers', 'Content-Type, X-Customer-Api-Key, X-Meta-Account-Id, X-Meta-Token, Authorization, Mcp-Session-Id, X-Admin-Token');
+  });
+
+  // CORS preflight handler for MCP
+  fastify.options('/mcp', async (request, reply) => {
+    reply.header('Access-Control-Allow-Origin', '*');
+    reply.header('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
+    reply.header('Access-Control-Allow-Headers', 'Content-Type, X-Customer-Api-Key, X-Meta-Account-Id, X-Meta-Token, Authorization, Mcp-Session-Id');
+    reply.header('Access-Control-Max-Age', '86400');
+    reply.status(204).send();
+  });
+
+  // ============================================================================
+  // MCP ENDPOINT — Single global server, all requests route through same transport
+  // ============================================================================
   fastify.post('/mcp', {
     schema: { tags: ['MCP Protocol'], summary: 'MCP JSON-RPC request' },
   }, async (request, reply) => {
+    reply.header('Access-Control-Allow-Origin', '*');
+    reply.header('Access-Control-Allow-Headers', 'Content-Type, X-Customer-Api-Key, X-Meta-Account-Id, X-Meta-Token, Authorization, Mcp-Session-Id');
+
     const startTime = Date.now();
     const customer = request.ctx?.customer;
+
     try {
-      const sessionId = request.headers['mcp-session-id'] as string | undefined;
-
-      if (customer) {
-        // Check weekly quota
-        if (!checkWeeklyQuota(customer)) {
-          if (!reply.sent) {
-            return reply.status(429).send({
-              jsonrpc: '2.0',
-              error: { code: -32001, message: `Weekly execution quota exceeded. Limit: ${customer.weekly_executions_limit}` },
-              id: null,
-            });
-          }
-          return;
-        }
-      }
-
-      if (sessionId && sessions.has(sessionId)) {
-        const session = sessions.get(sessionId)!;
-        session.lastSeen = Date.now();
-        reply.hijack();
-        await session.transport.handleRequest(request.raw, reply.raw, request.body);
-      } else if (!sessionId) {
-        const metaToken = request.headers['x-meta-token'] as string | undefined;
-        const metaAccountId = request.headers['x-meta-account-id'] as string | undefined;
-        const resolvedToken = metaToken || request.ctx?.metaToken || token;
-        const resolvedAccount = metaAccountId || request.ctx?.metaAccountId || process.env.META_AD_ACCOUNT_ID;
-
-        if (!resolvedToken) {
-          return reply.status(401).send({
-            jsonrpc: '2.0',
-            error: { code: -32002, message: 'Missing Meta access token. Connect an account or provide X-Meta-Token header.' },
-            id: null,
-          });
-        }
-
-        const { server, transport } = createMcpSession(resolvedToken, resolvedAccount, customer || undefined);
-        transport.onclose = () => {
-          const sid = transport.sessionId;
-          if (sid) { sessions.delete(sid); console.log(`Session closed: ${sid}`); }
-        };
-        await server.connect(transport);
-        reply.hijack();
-        await transport.handleRequest(request.raw, reply.raw, request.body);
-        if (transport.sessionId) {
-          sessions.set(transport.sessionId, { server, transport, lastSeen: Date.now(), customerId: customer?.id });
-          console.log(`Session created: ${transport.sessionId} (customer: ${customer?.email || 'master'})`);
-        }
-      } else {
-        reply.status(404).send({
+      // Check weekly quota for customer accounts
+      if (customer && !checkWeeklyQuota(customer)) {
+        return reply.status(429).send({
           jsonrpc: '2.0',
-          error: { code: -32000, message: 'Session not found. Send request without mcp-session-id to create a new session.' },
+          error: { code: -32001, message: `Weekly execution quota exceeded. Limit: ${customer.weekly_executions_limit}` },
           id: null,
         });
       }
 
+      // Check if MCP server is ready
+      if (!isServerReady) {
+        return reply.status(503).send({
+          jsonrpc: '2.0',
+          error: { code: -32003, message: 'MCP server not initialized. Configure META_ACCESS_TOKEN.' },
+          id: null,
+        });
+      }
+
+      const jsonRpcRequest = request.body as Record<string, unknown>;
+
+      // Send request through the global transport and get response
+      const response = await sendMcpRequest(jsonRpcRequest);
+
+      // Strip execution field from tools for compatibility
+      const resp = response as Record<string, unknown>;
+      if (resp.result && typeof resp.result === 'object') {
+        const result = resp.result as Record<string, unknown>;
+        if (result.tools && Array.isArray(result.tools)) {
+          result.tools = (result.tools as any[]).map((t: any) => {
+            const tool = { ...t };
+            delete tool.execution;
+            return tool;
+          });
+        }
+      }
+
+      reply.send(response);
+
       // Track usage
       if (customer) {
-        const body = request.body as { method?: string; params?: { name?: string } } | undefined;
-        const toolName = body?.method === 'tools/call' ? (body.params?.name || 'unknown') : 'mcp_session';
+        const method = jsonRpcRequest.method as string;
+        const toolName = method === 'tools/call'
+          ? ((jsonRpcRequest.params as Record<string, unknown>)?.name as string || 'unknown')
+          : 'mcp_session';
         await trackUsage(request, toolName, startTime, true);
       }
     } catch (error) {
@@ -272,41 +305,28 @@ async function main() {
       if (customer) {
         await trackUsage(request, 'mcp_error', startTime, false, String(error));
       }
-      if (!reply.sent) {
-        reply.status(500).send({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
-      }
+      reply.status(500).send({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Internal server error' },
+        id: null,
+      });
     }
   });
 
-  // MCP SSE
-  fastify.get('/mcp', {
-    schema: { tags: ['MCP Protocol'], summary: 'MCP SSE stream' },
-  }, async (request, reply) => {
-    const sessionId = request.headers['mcp-session-id'] as string | undefined;
-    if (!sessionId || !sessions.has(sessionId)) {
-      return reply.status(404).send({ error: 'Session not found' });
-    }
-    const session = sessions.get(sessionId)!;
-    session.lastSeen = Date.now();
-    reply.hijack();
-    await session.transport.handleRequest(request.raw, reply.raw);
+  // Also support GET on /mcp for SSE-style connections (some clients use this)
+  fastify.get('/mcp', async (request, reply) => {
+    reply.header('Access-Control-Allow-Origin', '*');
+    reply.send({
+      status: 'ok',
+      server: 'meta-ads-mcp',
+      version: '2.0.0',
+      tools: 77,
+      endpoint: '/mcp',
+      method: 'POST',
+    });
   });
 
-  // MCP DELETE
-  fastify.delete('/mcp', {
-    schema: { tags: ['MCP Protocol'], summary: 'Terminate MCP session' },
-  }, async (request, reply) => {
-    const sessionId = request.headers['mcp-session-id'] as string | undefined;
-    if (!sessionId || !sessions.has(sessionId)) {
-      return reply.status(404).send({ error: 'Session not found' });
-    }
-    const { transport } = sessions.get(sessionId)!;
-    sessions.delete(sessionId);
-    reply.hijack();
-    await transport.handleRequest(request.raw, reply.raw);
-  });
-
-  // REST Meta proxy routes (from base repo)
+  // REST Meta proxy routes
   await registerRestRoutes(fastify);
 
   // Start server
